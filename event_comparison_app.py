@@ -268,8 +268,21 @@ def load_data_from_database():
             # Restore DataFrames
             if data.get('df1'):
                 st.session_state.df1 = pd.read_json(data['df1'])
+                # Convert date column back to datetime
+                if data.get('date_column1'):
+                    st.session_state.date_column1 = data['date_column1']
+                    st.session_state.df1[data['date_column1']] = pd.to_datetime(
+                        st.session_state.df1[data['date_column1']]
+                    )
+
             if data.get('df2'):
                 st.session_state.df2 = pd.read_json(data['df2'])
+                # Convert date column back to datetime
+                if data.get('date_column2'):
+                    st.session_state.date_column2 = data['date_column2']
+                    st.session_state.df2[data['date_column2']] = pd.to_datetime(
+                        st.session_state.df2[data['date_column2']]
+                    )
 
             # Restore other values
             st.session_state.year1 = data.get('year1')
