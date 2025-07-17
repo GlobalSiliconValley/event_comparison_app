@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import numpy as np
+import json
 
 # Try to import Supabase, fall back to local storage if not available
 try:
@@ -44,13 +47,32 @@ if 'date_column2' not in st.session_state:
 if SUPABASE_AVAILABLE and "supabase" in st.secrets:
     @st.cache_resource
     def init_supabase():
-        url = st.secrets["supabase"]["url"]
-        key = st.secrets["supabase"]["key"]
-        return create_client(url, key)
+        try:
+            url = st.secrets["supabase"]["url"]
+            key = st.secrets["supabase"]["key"]
+
+            # Debug: Show URL format without revealing full URL
+            st.sidebar.write("URL check:")
+            st.sidebar.write(f"- Starts with https://: {url.startswith('https://')}")
+            st.sidebar.write(f"- Contains supabase.co: {'supabase.co' in url}")
+            st.sidebar.write(f"- Length: {len(url)} chars")
+
+            # Clean the URL - remove any trailing slashes or spaces
+            url = url.strip().rstrip('/')
+            key = key.strip()
+
+            # Additional cleaning - remove any quotes that might have been accidentally included
+            url = url.strip('"\'')
+            key = key.strip('"\'')
+
+            return create_client(url, key)
+        except Exception as e:
+            st.error(f"Error initializing Supabase: {str(e)}")
+            return None
 
     try:
         supabase = init_supabase()
-        SUPABASE_CONNECTED = True
+        SUPABASE_CONNECTED = supabase is not None
     except Exception as e:
         SUPABASE_CONNECTED = False
         st.error(f"Could not connect to Supabase: {str(e)}")
@@ -182,10 +204,13 @@ def save_data_to_database():
         return False
 
     try:
+        # Debug: Check what we're trying to save
+        st.write("Preparing data for save...")
+
         # Convert DataFrames to JSON-serializable format
         data = {
-            'df1': st.session_state.df1.to_json() if st.session_state.df1 is not None else None,
-            'df2': st.session_state.df2.to_json() if st.session_state.df2 is not None else None,
+            'df1': st.session_state.df1.to_json(date_format='iso') if st.session_state.df1 is not None else None,
+            'df2': st.session_state.df2.to_json(date_format='iso') if st.session_state.df2 is not None else None,
             'year1': st.session_state.year1,
             'year2': st.session_state.year2,
             'summit_date1': st.session_state.summit_date1.isoformat() if st.session_state.summit_date1 else None,
@@ -194,16 +219,37 @@ def save_data_to_database():
             'date_column2': st.session_state.date_column2
         }
 
+        # Debug: Show data size
+        data_str = json.dumps(data)
+        data_size_mb = len(data_str) / (1024 * 1024)
+        st.write(f"Data size: {data_size_mb:.2f} MB ({len(data_str):,} characters)")
+
+        if data_size_mb > 50:  # Supabase has limits
+            st.warning("Data might be too large. Consider filtering or sampling.")
+
         # Update or insert data
-        response = supabase.table('event_data').upsert({
-            'data_key': 'event_comparison_data',
+        # First, try to update existing record
+        response = supabase.table('event_data').update({
             'data_value': data
-        }).execute()
+        }).eq('data_key', 'event_comparison_data').execute()
+
+        # If no rows were updated, insert new record
+        if len(response.data) == 0:
+            response = supabase.table('event_data').insert({
+                'data_key': 'event_comparison_data',
+                'data_value': data
+            }).execute()
+
+        # Debug: Check response
+        st.write("Save response:", response)
 
         st.success("✅ Data saved to database successfully!")
         return True
     except Exception as e:
         st.error(f"Error saving to database: {str(e)}")
+        st.write("Error type:", type(e).__name__)
+        import traceback
+        st.text(traceback.format_exc())
         return False
 
 def load_data_from_database():
@@ -290,7 +336,7 @@ def parse_dates(df, date_column='Registration Date'):
 
     # If all formats fail, try pandas automatic parsing
     try:
-        df[date_column] = pd.to_datetime(df[date_column])
+        df[date_column] = pd.to_datetime(df[date_column], format='mixed', dayfirst=False)
         # Remove timezone information to avoid comparison issues
         if df[date_column].dt.tz is not None:
             df[date_column] = df[date_column].dt.tz_localize(None)
@@ -493,6 +539,30 @@ def create_daily_registration_chart(df1, df2, year1, year2, days_before_summit, 
 with st.sidebar:
     st.header("📁 Data Management")
 
+    # Debug info
+    with st.expander("Debug Info"):
+        st.write("df1 loaded:", st.session_state.df1 is not None)
+        st.write("df2 loaded:", st.session_state.df2 is not None)
+        if st.session_state.df1 is not None:
+            st.write("df1 shape:", st.session_state.df1.shape)
+        if st.session_state.df2 is not None:
+            st.write("df2 shape:", st.session_state.df2.shape)
+
+        # Force reload button
+        if st.button("🔄 Force Reload Files"):
+            # Check if file uploaders have files
+            if 'file2' in st.session_state and st.session_state.file2 is not None:
+                try:
+                    df2 = pd.read_csv(st.session_state.file2)
+                    df2, date_col2 = parse_dates(df2)
+                    if df2 is not None:
+                        st.session_state.df2 = df2
+                        st.session_state.date_column2 = date_col2
+                        st.success("Force reloaded file 2!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Force reload error: {str(e)}")
+
     if SUPABASE_CONNECTED:
         st.success("✅ Database connected")
 
@@ -501,10 +571,40 @@ with st.sidebar:
             if load_data_from_database():
                 st.rerun()
 
-        # Save current data button
+        # Save current data button - show when both files are loaded
         if st.session_state.df1 is not None and st.session_state.df2 is not None:
-            if st.button("Save Data to Database", type="secondary"):
-                save_data_to_database()
+            st.markdown("---")
+            if st.button("💾 Save Data to Database", type="secondary", key="save_btn", help="Save current data to Supabase"):
+                with st.spinner("Saving to database..."):
+                    if save_data_to_database():
+                        st.balloons()
+        else:
+            st.info("Upload both CSV files to enable saving to database")
+
+        # Connection test button
+        if st.button("🔌 Test Connection"):
+            try:
+                import socket
+                url = st.secrets["supabase"]["url"]
+                # Extract hostname
+                hostname = url.replace("https://", "").replace("http://", "").split("/")[0]
+                st.write(f"Testing connection to: {hostname}")
+
+                # Try DNS lookup
+                ip = socket.gethostbyname(hostname)
+                st.success(f"✅ DNS resolved! IP: {ip}")
+
+                # Try a simple HTTP request
+                import requests
+                response = requests.get(f"{url}/rest/v1/", headers={"apikey": "test"}, timeout=5)
+                st.write(f"HTTP Status: {response.status_code}")
+
+            except socket.gaierror as e:
+                st.error(f"❌ DNS Error: Cannot resolve hostname")
+                st.write("Make sure your URL is correct in .streamlit/secrets.toml")
+            except Exception as e:
+                st.error(f"Connection test failed: {str(e)}")
+                st.write(f"Error type: {type(e).__name__}")
     else:
         st.warning("Database not connected")
         with st.expander("Setup Instructions"):
@@ -564,6 +664,7 @@ with col2:
                 if df2 is not None:
                     st.session_state.df2 = df2
                     st.session_state.date_column2 = date_col2
+                    st.success(f"✅ Successfully loaded file into session state")
             except Exception as e:
                 st.error(f"Error reading file: {str(e)}")
 
